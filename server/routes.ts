@@ -2,9 +2,10 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { z } from "zod";
-import { generateFormFromPrompt } from "./services/gemini";
+import { generateFormFromPrompt, editJsonWithLLM } from "./services/gemini";
 import { insertFormConfigSchema, insertFormResponseSchema } from "@shared/schema";
 import adminRoutes from "./admin";
+
 import * as supabaseService from "./services/supabase";
 
 const promptSchema = z.object({
@@ -196,6 +197,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(400).json({
         error: errorMessage
       });
+    }
+  });
+  app.post("/api/edit-json", async (req, res) => {
+    try {
+      const { json, instruction } = req.body as {
+        json: object;
+        instruction: string;
+      };
+  
+      // send original + instruction off to your LLM helper
+      const updatedText = await editJsonWithLLM(json, instruction);
+      const updated = JSON.parse(updatedText);
+  
+      return res.json({ config: updated });
+    } catch (error) {
+      console.error("Error editing JSON:", error);
+      return res.status(500).json({ error: "Failed to edit JSON" });
     }
   });
 

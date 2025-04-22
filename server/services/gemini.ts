@@ -770,3 +770,53 @@ function createCustomizedDemoForm(prompt: string): FormConfig {
 
   return customForm;
 }
+/**
+ * Applies a user instruction to an existing FormConfig JSON
+ * by calling the Gemini API and returning only the new JSON string.
+ */
+export async function editJsonWithLLM(
+  original: object,
+  instruction: string
+): Promise<string> {
+  // Build a prompt that gives Gemini ONLY the JSON plus your edit instruction
+  const fullPrompt = `
+You are given this JSON only (no extra text):
+${JSON.stringify(original, null, 2)}
+
+Apply this instruction and output ONLY the modified, valid JSON:
+"${instruction}"
+`;
+
+  // Send to the same Gemini endpoint you already use
+  const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        { role: "user", parts: [{ text: fullPrompt }] }
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        topP: 0.8,
+        topK: 40,
+        maxOutputTokens: 8192,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Gemini edit‑JSON API error: ${response.status} ${response.statusText}`
+    );
+  }
+
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    throw new Error("Empty response from Gemini when editing JSON");
+  }
+
+  // Pull out the JSON block from any surrounding text
+  const match = text.match(/\{[\s\S]*\}/);
+  return (match ? match[0] : text).trim();
+}
