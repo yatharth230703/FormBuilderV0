@@ -1,10 +1,10 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { Textarea } from "@/components/ui/textarea";
 import { useFormContext } from "@/contexts/form-context";
 import { apiRequest } from "@/lib/queryClient";
-import { Thermometer, Copy, Download, ArrowUp, Palette } from "lucide-react";
+import { Thermometer, Copy, Download, ArrowUp, Palette, Send } from "lucide-react";
 import { FormConfig } from "@shared/types";
 import { useLocation } from "wouter";
 
@@ -17,28 +17,43 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-// minimal chat message type
-type ChatMessage = { role: "user" | "assistant"; content: string };
+// Message type for chat history
+type ChatMessage = {
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: Date;
+  isGenerating?: boolean;
+  jsonData?: FormConfig | null;
+};
 
 export default function LeftPanel() {
   const [prompt, setPrompt] = useState<string>("");
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
+    {
+      role: "system",
+      content: "Welcome to Forms Engine! Enter a prompt to generate a form.",
+      timestamp: new Date(),
+    },
+  ]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusText, setStatusText] = useState("Ready");
   const [statusColor, setStatusColor] = useState("bg-green-500");
-
-  // ── new state for JSON‑editor chatbot ──
-  const [generatedConfig, setGeneratedConfig] = useState<FormConfig | null>(null);
-  const [editedConfig, setEditedConfig] = useState<FormConfig | null>(null);
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-  const [showEditor, setShowEditor] = useState(false);
-  // New state added based on the diff
-  const [chatInput, setChatInput] = useState("");
-  // ──────────────────────────────────────
+  
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const [_, setLocation] = useLocation();
   const { toast } = useToast();
   const { setFormConfig, formConfig, resetForm } = useFormContext();
 
+  // Scroll to bottom when chat history updates
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [chatHistory]);
+
+  // Theme management functions
   const applyTheme = (themeName: string) => {
     document.documentElement.classList.remove(
       "theme-modern",
@@ -67,6 +82,7 @@ export default function LeftPanel() {
     });
   };
 
+  // Load fonts and initialize theme
   useEffect(() => {
     const savedTheme = localStorage.getItem("theme-preset") || "modern";
     applyTheme(savedTheme);
@@ -86,6 +102,7 @@ export default function LeftPanel() {
     });
   }, []);
 
+  // Add CSS variables for theming
   useEffect(() => {
     const styleEl = document.createElement("style");
     styleEl.textContent = `
@@ -124,61 +141,60 @@ export default function LeftPanel() {
     return () => document.head.removeChild(styleEl);
   }, []);
 
-  const handlePromptChange = (
-    e: React.ChangeEvent<HTMLTextAreaElement>
-  ) => setPrompt(e.target.value);
-
-  const handleGenerateForm = async () => {
-    if (!prompt.trim()) {
-      toast({
-        title: "Error",
-        description: "Please enter a prompt",
-        variant: "destructive",
-      });
-      return;
-    }
-
+  // Handle sending a message in chat
+  const handleSendMessage = async (userText: string) => {
+    if (!userText.trim()) return;
+    
+    // Add user message to chat
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: userText,
+      timestamp: new Date(),
+    };
+    setChatHistory((prev) => [...prev, userMessage]);
+    
+    // Clear input
+    setPrompt("");
+    
+    // Start loading state
     setIsGenerating(true);
-    setStatusText("Generating form...");
-    setStatusColor("bg-yellow-500");
-
+    
+    // Add temporary assistant message with loading state
+    const tempAssistantMsg: ChatMessage = {
+      role: "assistant",
+      content: "Generating...",
+      timestamp: new Date(),
+      isGenerating: true,
+    };
+    setChatHistory((prev) => [...prev, tempAssistantMsg]);
+    
+    // Determine if this is initial form generation or JSON editing
+    const isInitialGeneration = !formConfig;
+    
     try {
-      const data = await apiRequest<{ id: number; config: FormConfig }>({
-        url: "/api/prompt",
-        method: "POST",
-        body: JSON.stringify({ prompt }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      if (data.config) {
-        // stash for editing
-        setGeneratedConfig(data.config);
-        setEditedConfig(data.config);
-        setChatHistory([
-          {
-            role: "assistant",
-            content:
-              "Here’s your initial JSON. You can now ask me to tweak it.",
-          },
-        ]);
-        setShowEditor(true);
-        setStatusText("Form generated successfully");
-        setStatusColor("bg-green-500");
-        toast({
-          title: "Success",
-          description: "Form configuration generated successfully",
-        });
+      if (isInitialGeneration) {
+        // Generate initial form
+        await handleInitialFormGeneration(userText);
       } else {
-        throw new Error("Invalid response from server");
+        // Edit existing JSON
+        await handleJsonEdit(userText);
       }
     } catch (error) {
-      console.error("Error generating form:", error);
-      setStatusText("Form generation failed");
-      setStatusColor("bg-red-500");
+      // Handle errors
+      console.error("Error:", error);
+      // Remove loading message
+      setChatHistory((prev) => prev.filter(msg => !msg.isGenerating));
+      // Add error message
+      const errorMsg: ChatMessage = {
+        role: "assistant",
+        content: `Error: ${error instanceof Error ? error.message : "Something went wrong"}`,
+        timestamp: new Date(),
+      };
+      setChatHistory((prev) => [...prev, errorMsg]);
+      
       toast({
         title: "Error",
-        description:
-          error instanceof Error ? error.message : "Failed to generate form",
+        description: error instanceof Error ? error.message : "Failed to process request",
         variant: "destructive",
       });
     } finally {
@@ -186,42 +202,96 @@ export default function LeftPanel() {
     }
   };
 
-  const handleChatSend = async (userText: string) => {
-    if (!editedConfig) return;
-    if (!userText.trim()) return; // Prevent sending empty messages
+  // Handle initial form generation
+  const handleInitialFormGeneration = async (promptText: string) => {
+    setStatusText("Generating form...");
+    setStatusColor("bg-yellow-500");
 
-    // 1) Append the user’s message to the chat history
-    setChatHistory((h) => [...h, { role: "user", content: userText }]);
+    const data = await apiRequest<{ id: number; config: FormConfig }>({
+      url: "/api/prompt",
+      method: "POST",
+      body: JSON.stringify({ prompt: promptText }),
+      headers: { "Content-Type": "application/json" },
+    });
 
-    try {
-      // 2) Send original JSON + instruction to your new API endpoint
-      const res = await apiRequest<{ config: FormConfig }>({
-        url: "/api/edit-json",
-        method: "POST",
-        body: JSON.stringify({
-          json: editedConfig,
-          instruction: userText,
-        }),
-        headers: { "Content-Type": "application/json" },
-      });
+    if (!data.config) {
+      throw new Error("Invalid response from server");
+    }
 
-      // 3) Update the editedConfig and append the assistant’s reply
-      setEditedConfig(res.config);
-      setChatHistory((h) => [
-        ...h,
-        { role: "assistant", content: "✅ Done! Here’s the updated JSON." },
-      ]);
-    } catch (err) {
-      console.error("JSON‑edit error:", err);
-      toast({
-        title: "Error",
-        description: "Failed to apply your edit.",
-        variant: "destructive",
-      });
+    // Update form config
+    setFormConfig(data.config);
+    setStatusText("Form generated successfully");
+    setStatusColor("bg-green-500");
+
+    // Remove loading message
+    setChatHistory((prev) => prev.filter(msg => !msg.isGenerating));
+    
+    // Add success message with JSON
+    const successMsg: ChatMessage = {
+      role: "assistant",
+      content: "✅ Form generated successfully! Here's the JSON. You can now ask me to modify specific parts of the form.",
+      timestamp: new Date(),
+      jsonData: data.config,
+    };
+    setChatHistory((prev) => [...prev, successMsg]);
+
+    toast({
+      title: "Success",
+      description: "Form configuration generated successfully",
+    });
+  };
+
+  // Handle JSON editing
+  const handleJsonEdit = async (instruction: string) => {
+    if (!formConfig) {
+      throw new Error("No form configuration to edit");
+    }
+
+    // Call the API to edit the JSON
+    const res = await apiRequest<{ config: FormConfig }>({
+      url: "/api/edit-json",
+      method: "POST",
+      body: JSON.stringify({
+        json: formConfig,
+        instruction: instruction,
+      }),
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!res.config) {
+      throw new Error("Invalid response from server");
+    }
+
+    // Update form config
+    setFormConfig(res.config);
+
+    // Remove loading message
+    setChatHistory((prev) => prev.filter(msg => !msg.isGenerating));
+    
+    // Add success message with updated JSON
+    const successMsg: ChatMessage = {
+      role: "assistant",
+      content: "✅ Form updated successfully! Here's the updated JSON. You can continue making changes or test the form.",
+      timestamp: new Date(),
+      jsonData: res.config,
+    };
+    setChatHistory((prev) => [...prev, successMsg]);
+
+    toast({
+      title: "Success",
+      description: "Form configuration updated successfully",
+    });
+  };
+
+  // Handle keyboard shortcuts
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage(prompt);
     }
   };
 
-
+  // Handle copy JSON
   const handleCopyJson = () => {
     if (!formConfig) return;
     navigator.clipboard
@@ -241,6 +311,7 @@ export default function LeftPanel() {
       );
   };
 
+  // Handle download JSON
   const handleDownloadJson = () => {
     if (!formConfig) return;
     const jsonString = JSON.stringify(formConfig, null, 2);
@@ -316,184 +387,111 @@ export default function LeftPanel() {
         </div>
       </div>
 
-      {/* Prompt Input */}
-      <div className="mb-4">
-        <label
-          htmlFor="prompt"
-          className="block text-sm font-medium mb-2 text-gray-700 flex items-center"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="mr-1"
+      {/* Chat Container */}
+      <div 
+        ref={chatContainerRef}
+        className="flex-1 overflow-y-auto border rounded-lg p-4 mb-4 bg-gray-50"
+      >
+        {chatHistory.map((message, index) => (
+          <div 
+            key={index} 
+            className={`mb-4 ${
+              message.role === "system" 
+                ? "px-3 py-2 text-center text-sm text-gray-500" 
+                : ""
+            }`}
           >
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
-          Enter Form Prompt
-        </label>
+            {message.role !== "system" && (
+              <div className={`flex mb-1 ${
+                message.role === "user" ? "justify-end" : "justify-start"
+              }`}>
+                <div className={`px-3 py-2 rounded-2xl max-w-[85%] ${
+                  message.role === "user" 
+                    ? "bg-primary text-white" 
+                    : "bg-gray-200 text-gray-800"
+                }`}>
+                  {message.isGenerating ? (
+                    <div className="flex items-center gap-2">
+                      <div className="animate-pulse">Generating</div>
+                      <div className="flex space-x-1">
+                        <div className="w-1.5 h-1.5 bg-current rounded-full animate-bounce" style={{ animationDelay: "0ms" }}></div>
+                        <div className="w-1.5 h-1.5 bg-current rounded-full animate-bounce" style={{ animationDelay: "150ms" }}></div>
+                        <div className="w-1.5 h-1.5 bg-current rounded-full animate-bounce" style={{ animationDelay: "300ms" }}></div>
+                      </div>
+                    </div>
+                  ) : (
+                    message.content
+                  )}
+                </div>
+              </div>
+            )}
+            
+            {/* System messages */}
+            {message.role === "system" && (
+              <div>{message.content}</div>
+            )}
+            
+            {/* JSON Preview (only for assistant messages with JSON data) */}
+            {message.role === "assistant" && message.jsonData && (
+              <div className="mt-3 p-3 bg-white border border-gray-200 rounded-lg text-xs font-mono">
+                <div className="mb-2 flex justify-between items-center">
+                  <span className="text-xs font-semibold text-gray-700">Generated JSON</span>
+                  <div className="flex space-x-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0"
+                      title="Copy JSON"
+                      onClick={handleCopyJson}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0"
+                      title="Download JSON"
+                      onClick={handleDownloadJson}
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+                <div className="max-h-40 overflow-y-auto">
+                  <pre className="whitespace-pre-wrap text-[10px] leading-tight">
+                    {JSON.stringify(message.jsonData, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Input Area */}
+      <div className="flex items-end gap-2">
         <Textarea
-          id="prompt"
-          className="w-full h-24 p-3 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent shadow-sm"
-          placeholder="E.g., Create an onboarding survey that asks for name, role, preferred tools, and expected project count."
+          ref={inputRef}
+          placeholder={formConfig 
+            ? "Describe how you want to modify the form..."
+            : "Describe the form you want to create..."}
           value={prompt}
-          onChange={handlePromptChange}
+          onChange={(e) => setPrompt(e.target.value)}
+          onKeyDown={handleKeyDown}
+          className="min-h-20 flex-1 resize-none"
+          disabled={isGenerating}
         />
+        <Button 
+          className="h-10 px-3"
+          onClick={() => handleSendMessage(prompt)}
+          disabled={isGenerating || !prompt.trim()}
+        >
+          <Send className="h-5 w-5" />
+        </Button>
       </div>
 
-      {/* Generate Button */}
-      <Button
-        className="w-full bg-primary text-white font-medium py-3 rounded-lg hover:bg-primary-dark transition-colors mb-4 flex items-center justify-center shadow-sm"
-        onClick={handleGenerateForm}
-        disabled={isGenerating || !prompt.trim()}
-      >
-        <ArrowUp className="mr-2 h-5 w-5" />
-        {isGenerating ? "Generating..." : "Generate Form"}
-      </Button>
-
-      {/* JSON‑Editor Chat Panel */}
-      {showEditor && (
-        <div className="flex-[3] flex flex-col border rounded-lg p-3 bg-gray-50 mb-4 overflow-y-auto">
-          <div className="font-medium mb-2">🔧 Edit JSON via Chatbot</div>
-          <div className="flex-1 overflow-y-auto mb-2">
-            {chatHistory.map((m, i) => (
-              <div
-                key={i}
-                className={`my-1 p-2 rounded ${
-                  m.role === "user" ? "bg-primary/10" : "bg-secondary/10"
-                }`}
-              >
-                <strong>{m.role === "user" ? "You" : "Bot"}:</strong> {m.content}
-              </div>
-            ))}
-          </div>
-          <div className="flex items-center mb-2">
-            {/* Modified Textarea */}
-            <Textarea
-              className="flex-1 h-16 mr-2 resize-none"
-              placeholder="e.g. “Add a new contact field at the end”"
-              value={chatInput} // Added value prop
-              onChange={((e) => setChatInput(e.target.value))} // Added onChange handler
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleChatSend(chatInput); // Use chatInput state for sending
-                  setChatInput(""); // Clear input after sending
-                }
-              }}
-            />
-            {/* Modified Button */}
-            <Button
-              size="sm"
-              onClick={() => {
-                handleChatSend(chatInput); // Use chatInput state for sending
-                setChatInput(""); // Clear input after sending
-              }}
-            >
-              Send
-            </Button>
-          </div>
-          <Button
-            className="mt-3 w-full"
-            onClick={() => {
-              if (editedConfig) {
-                setFormConfig(editedConfig);
-                setShowEditor(false);
-                toast({
-                  title: "Applied edits",
-                  description: "Form JSON updated",
-                });
-              }
-            }}
-          >
-            Apply Changes to Form
-          </Button>
-        </div>
-      )}
-
-      {/* Generated JSON */}
-      <div
-        className={`flex ${
-          showEditor ? "flex-[4]" : "flex-1"
-        } flex-col overflow-hidden`}
-      >
-        <div className="flex justify-between items-center mb-2">
-          <label className="block text-sm font-medium text-gray-700 flex items-center">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="mr-1"
-            >
-              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-              <circle cx="12" cy="12" r="3" />
-            </svg>
-            Generated JSON
-          </label>
-          <div className="flex space-x-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-xs p-1 text-primary hover:text-primary-dark"
-              title="Copy JSON"
-              onClick={handleCopyJson}
-              disabled={!formConfig}
-            >
-              <Copy className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-xs p-1 text-primary hover:text-primary-dark"
-              title="Download JSON"
-              onClick={handleDownloadJson}
-              disabled={!formConfig}
-            >
-              <Download className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-
-        <div className="flex-1 border rounded-lg p-3 bg-gray-50 overflow-y-auto custom-scrollbar text-sm font-mono relative">
-          {/** use the edited JSON while in “editor” mode, else the final formConfig */}
-          {(() => {
-            const active = showEditor
-              ? editedConfig ?? generatedConfig
-              : formConfig;
-
-            return active ? (
-              <pre className="whitespace-pre-wrap overflow-auto">
-                {JSON.stringify(active, null, 2)}
-              </pre>
-            ) : (
-              <div className="text-center text-gray-500 p-8">
-                Generated JSON will appear here after form creation
-              </div>
-            );
-          })()}
-
-          {isGenerating && (
-            <div className="absolute inset-0 bg-white bg-opacity-80 flex items-center justify-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Status Bar */}
-      <div className="py-2 mt-2 text-xs text-gray-500 flex items-center">
+      {/* Status indicator */}
+      <div className="mt-2 flex text-xs text-gray-500 items-center">
         <span className={`w-2 h-2 rounded-full ${statusColor} mr-2`}></span>
         <span>{statusText}</span>
       </div>

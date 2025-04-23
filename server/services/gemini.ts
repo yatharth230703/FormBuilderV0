@@ -807,7 +807,7 @@ Apply this instruction and output ONLY the modified, valid JSON:
   if (!response.ok) {
     throw new Error(
       `Gemini edit‑JSON API error: ${response.status} ${response.statusText}`
-    );
+    );S
   }
 
   const data = await response.json();
